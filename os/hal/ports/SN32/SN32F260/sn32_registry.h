@@ -68,7 +68,7 @@
  */
 #define SN32_SPI0_HANDLER          Vector74
 #define SN32_SPI0_NUMBER           SPI0_IRQn
-#define SN32_HAS_SPI0             TRUE
+#define SN32_HAS_SPI0              TRUE
 
 /*
  * I2C unit.
