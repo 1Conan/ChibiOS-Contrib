@@ -32,37 +32,6 @@
 
 #include "mcuconf.h"
 
-#ifdef USB_DEBUG
-
-#include "chmtx.h"
-#include "rp_fifo.h"
-
-mutex_t cmtx;
-
-#define CMD_RESET 0x0F
-#define CMD_SETUP 0x01
-#define CMD_READ_SETUP 0x02
-#define CMD_SET_ADDR 0x03
-#define CMD_START_IN 0x04
-#define CMD_START_OUT 0x05
-#define CMD_BUFF_STATUS 0x06
-#define CMD_EP_DONE 0x07
-#define CMD_DATA_ERROR 0x09
-#define CMD_PREP_IN_EP  0x0A
-#define CMD_PREP_OUT_EP 0x0B
-#define CMD_SET_ADDR_HW 0x0C
-#define CMD_EP_NEXT 0x0D
-
-void cmd_send(uint8_t cmd, uint8_t length) {
-  uint32_t data = (cmd << 24) | (length << 16);
-  fifoBlockingWrite(data);
-}
-
-void data_send(uint32_t data) {
-  fifoBlockingWrite(data);
-}
-#endif // USB_DEBUG
-
 /*===========================================================================*/
 /* Driver local definitions.                                                 */
 /*===========================================================================*/
@@ -176,6 +145,9 @@ static uint16_t usb_buffer_next_offset(USBDriver *usbp, uint16_t size, bool is_d
  * @brief   Reset endpoint 0.
  */
 static void reset_ep0(USBDriver *usbp) {
+  usbp->epc[0]->out_state->next_pid = 1U;
+  usbp->epc[0]->out_state->active = false;
+  usbp->epc[0]->out_state->stalled = false;
   usbp->epc[0]->in_state->next_pid = 1U;
   usbp->epc[0]->in_state->active = false;
   usbp->epc[0]->in_state->stalled = false;
@@ -210,22 +182,30 @@ static void reset_endpoint(USBDriver *usbp, usbep_t ep, bool is_in) {
  * @brief   Prepare buffer for receiving data.
  */
 uint32_t usb_prepare_out_ep_buffer(USBDriver *usbp, usbep_t ep, uint8_t buffer_index) {
-  uint32_t buf_ctrl = 0;
-  const USBEndpointConfig *epcp = usbp->epc[ep];
-  USBOutEndpointState *oesp = usbp->epc[ep]->out_state;
+    uint32_t buf_ctrl = 0;
+    const USBEndpointConfig *epcp = usbp->epc[ep];
+    USBOutEndpointState *oesp = usbp->epc[ep]->out_state;
+
+    oesp->active = true;
 
     /* PID */
     buf_ctrl |= oesp->next_pid ? USB_BUFFER_BUFFER0_DATA_PID : 0;
     oesp->next_pid ^= 1U;
 
-    buf_ctrl |= USB_BUFFER_BUFFER0_AVAILABLE | epcp->out_maxsize;
+    uint16_t buf_len = oesp->rxsize < epcp->out_maxsize ? oesp->rxsize : epcp->out_maxsize;
+    buf_ctrl |= USB_BUFFER_BUFFER0_AVAILABLE | buf_len;
+    buf_ctrl &= ~USB_BUFFER_BUFFER0_FULL;
 
-    oesp->active = true;
+    if (oesp->rxcnt + buf_len >= oesp->rxsize) {
+        /* Last buffer */
+        buf_ctrl |= USB_BUFFER_BUFFER0_LAST;
+    }
+
     if (buffer_index) {
       buf_ctrl = buf_ctrl << 16;
     }
 
-  return buf_ctrl;
+    return buf_ctrl;
 }
 
 /**
@@ -256,35 +236,32 @@ static void usb_prepare_out_ep(USBDriver *usbp, usbep_t ep) {
   }
 
   BUF_CTRL(ep).OUT = buf_ctrl;
-
-#ifdef USB_DEBUG
-  cmd_send(CMD_PREP_OUT_EP, 2);
-  data_send(ep_ctrl);
-  data_send(buf_ctrl);
-#endif
 }
 
 /**
  * @brief   Prepare buffer for sending data.
  */
 static uint32_t usb_prepare_in_ep_buffer(USBDriver *usbp, usbep_t ep, uint8_t buffer_index) {
-  uint8_t *buff;
-  uint16_t buf_len;
-  uint32_t buf_ctrl = 0;
-  const USBEndpointConfig *epcp = usbp->epc[ep];
-  USBInEndpointState *iesp = usbp->epc[ep]->in_state;
+    uint8_t *buff;
+    uint16_t buf_len;
+    uint32_t buf_ctrl = 0;
+    const USBEndpointConfig *epcp = usbp->epc[ep];
+    USBInEndpointState *iesp = usbp->epc[ep]->in_state;
 
-  /* txsize - txlast gives size of data to be sent but not yet in the buffer */
-  buf_len = epcp->in_maxsize < iesp->txsize - iesp->txlast ?
-            epcp->in_maxsize : iesp->txsize - iesp->txlast;
+    iesp->active = true;
+
+    /* txsize - txlast gives size of data to be sent but not yet in the buffer */
+    buf_len = epcp->in_maxsize < iesp->txsize - iesp->txlast ?
+              epcp->in_maxsize : iesp->txsize - iesp->txlast;
 
     iesp->txlast += buf_len;
 
     /* Host only? */
-    //if (iesp->txsize <= iesp->txlast) {
+    if (iesp->txsize <= iesp->txlast) {
       /* Last buffer */
-      //buf_ctrl |= USB_BUFFER_BUFFER0_LAST;
-    //}
+      buf_ctrl |= USB_BUFFER_BUFFER0_LAST;
+    }
+
     /* PID */
     buf_ctrl |= iesp->next_pid ? USB_BUFFER_BUFFER0_DATA_PID : 0;
     iesp->next_pid ^= 1U;
@@ -298,12 +275,11 @@ static uint32_t usb_prepare_in_ep_buffer(USBDriver *usbp, usbep_t ep, uint8_t bu
                 USB_BUFFER_BUFFER0_AVAILABLE |
                 buf_len;
 
-    iesp->active = true;
     if (buffer_index) {
       buf_ctrl = buf_ctrl << 16;
     }
 
-  return buf_ctrl;
+    return buf_ctrl;
 }
 
 /**
@@ -346,12 +322,6 @@ static void usb_prepare_in_ep(USBDriver *usbp, usbep_t ep) {
   }
 
   BUF_CTRL(ep).IN = buf_ctrl;
-
-#ifdef USB_DEBUG
-  cmd_send(CMD_PREP_IN_EP, 2);
-  data_send(ep_ctrl);
-  data_send(buf_ctrl);
-#endif
 }
 
 /**
@@ -371,21 +341,14 @@ static void usb_serve_endpoint(USBDriver *usbp, usbep_t ep, bool is_in) {
     iesp->txcnt = iesp->txlast;
     n = iesp->txsize - iesp->txcnt;
     if (n > 0) {
-#ifdef USB_DEBUG
-      cmd_send(CMD_EP_NEXT, 1);
-      data_send((1 << 7) | ep);
-#endif
       /* Transfer not completed, there are more packets to send. */
       usb_prepare_in_ep(usbp, ep);
     } else {
-#ifdef USB_DEBUG
-      cmd_send(CMD_EP_DONE, 1);
-      data_send((1 << 7) | ep);
-#endif
       /* Transfer complete */
       _usb_isr_invoke_in_cb(usbp, ep);
 
-      iesp->active = iesp->stalled = false;
+      iesp->active = false;
+      iesp->stalled = false;
     }
   } else {
     /* OUT endpoint */
@@ -403,16 +366,12 @@ static void usb_serve_endpoint(USBDriver *usbp, usbep_t ep, bool is_in) {
     oesp->rxpkts -= 1;
 
     /* Short packet or all packetes have been received. */
-    if (oesp->rxpkts <= 0 || n <= epcp->out_maxsize) {
-#ifdef USB_DEBUG
-      cmd_send(CMD_EP_DONE, 1);
-      data_send(ep);
-#endif
+    if (oesp->rxpkts == 0 || n < epcp->out_maxsize) {
+      oesp->active = false;
+      oesp->stalled = false;
+
       /* Transifer complete */
       _usb_isr_invoke_out_cb(usbp, ep);
-      usb_prepare_out_ep(usbp, ep);
-
-      oesp->active = oesp->stalled = false;
     } else {
       /* Receive remained data */
       usb_prepare_out_ep(usbp, ep);
@@ -432,32 +391,22 @@ static void usb_serve_endpoint(USBDriver *usbp, usbep_t ep, bool is_in) {
  * @isr
  */
 OSAL_IRQ_HANDLER(RP_USBCTRL_IRQ_HANDLER) {
-  uint32_t ints;
-  USBDriver *usbp = &USBD1;
-
   OSAL_IRQ_PROLOGUE();
 
-  ints = USB->INTS;
+  USBDriver *usbp = &USBD1;
+  uint32_t ints = USB->INTS;
 
   /* USB setup packet handling. */
   if (ints & USB_INTS_SETUP_REQ) {
-#ifdef USB_DEBUG
-    //cmd_send(CMD_SETUP, 0);
-#endif
     USB->CLR.SIESTATUS = USB_SIE_STATUS_SETUP_REC;
 
-    usbp->epc[0]->in_state->next_pid = 1U;
+    reset_ep0(usbp);
 
     _usb_isr_invoke_setup_cb(usbp, 0);
-
-    reset_ep0(usbp);
   }
 
   /* USB bus reset condition handling. */
   if (ints & USB_INTS_BUS_RESET) {
-#ifdef USB_DEBUG
-    cmd_send(CMD_RESET, 0);
-#endif
     USB->CLR.SIESTATUS = USB_SIE_STATUS_BUS_RESET;
 
     _usb_reset(usbp);
@@ -489,20 +438,12 @@ OSAL_IRQ_HANDLER(RP_USBCTRL_IRQ_HANDLER) {
 
   /* Endpoint events handling.*/
   if (ints & USB_INTS_BUFF_STATUS) {
-#ifdef USB_DEBUG
-    cmd_send(CMD_BUFF_STATUS, 1);
-    data_send(USB->BUFSTATUS);
-#endif
     uint32_t buf_status = USB->BUFSTATUS;
     uint32_t bit = 1U;
     for (uint8_t i = 0; buf_status && i < 32; i++) {
       if (buf_status & bit) {
         /* Clear flag */
         USB->CLR.BUFSTATUS = bit;
-#ifdef USB_DEBUG
-        //cmd_send(CMD_BUFF_STATUS, 1);
-        //data_send(((i >> 1U) << 16) | (i & 1U));
-#endif
         /* Finish on the endpoint or transfer remained data */
         usb_serve_endpoint(&USBD1, i >> 1U, (i & 1U) == 0);
 
@@ -514,9 +455,6 @@ OSAL_IRQ_HANDLER(RP_USBCTRL_IRQ_HANDLER) {
 
 #if RP_USB_USE_ERROR_DATA_SEQ_INTR == TRUE
   if (ints & USB_INTE_ERROR_DATA_SEQ) {
-#ifdef USB_DEBUG
-    cmd_send(CMD_DATA_ERROR, 0);
-#endif
     USB->CLR.SIESTATUS = USB_SIE_STATUS_DATA_SEQ_ERROR;
   }
 #endif /* RP_USB_USE_ERROR_DATA_SEQ_INTR */
@@ -554,16 +492,14 @@ void usb_lld_init(void) {
  */
 void usb_lld_start(USBDriver *usbp) {
 #if RP_USB_USE_USBD0 == TRUE
-#ifdef USB_DEBUG
-  chMtxObjectInit(&cmtx);
-#endif
   if (&USBD1 == usbp) {
     if (usbp->state == USB_STOP) {
       /* Reset usb controller */
       hal_lld_peripheral_reset(RESETS_ALLREG_USBCTRL);
       hal_lld_peripheral_unreset(RESETS_ALLREG_USBCTRL);
 
-      /* Clear any previous state in dpram */
+      /* Clear any previos state in dpram and hw regs */
+      memset(USB, 0, sizeof(*USB));
       memset(USB_DPSRAM, 0, sizeof(*USB_DPSRAM));
 
       /* Mux the controller to the onboard usb phy */
@@ -607,9 +543,6 @@ void usb_lld_start(USBDriver *usbp) {
 
       /* Enable USB interrupt. */
       nvicEnableVector(RP_USBCTRL_IRQ_NUMBER, RP_IRQ_USB0_PRIORITY);
-
-      /* Present full speed device by enabling pull up on DP */
-      USB->SET.SIECTRL = USB_SIE_CTRL_PULLUP_EN;
     }
   }
 #endif
@@ -625,9 +558,10 @@ void usb_lld_start(USBDriver *usbp) {
 void usb_lld_stop(USBDriver *usbp) {
 #if RP_USB_USE_USBD0 == TRUE
   if (&USBD1 == usbp) {
-    if (usbp->state == USB_READY) {
-      /* Disable interrupt */
+    if (usbp->state != USB_STOP) {
+      /* Disable USB interrupt */
       USB->INTE = 0;
+      nvicDisableVector(RP_USBCTRL_IRQ_NUMBER);
 
       /* Disable controller */
       USB->CLR.MAINCTRL = USB_MAIN_CTRL_CONTROLLER_EN;
@@ -644,12 +578,23 @@ void usb_lld_stop(USBDriver *usbp) {
  * @notapi
  */
 void usb_lld_reset(USBDriver *usbp) {
-  /* EP0 initialization.*/
-  usbp->epc[0] = &ep0config;
-  usb_lld_init_endpoint(usbp, 0);
+    /* EP0 initialization.*/
+    usbp->epc[0] = &ep0config;
+    usb_lld_init_endpoint(usbp, 0U);
 
-  /* Reset device address. */
-  USB->DEVADDRCTRL = 0;
+    /* Reset device address. */
+    USB->DEVADDRCTRL = 0U;
+
+    /* Reset USB memory */
+    usbp->noffset = 0U;
+
+    /* Clear all non control endpoint registers */
+    for (int ep = 1; ep < USB_MAX_ENDPOINTS; ep++) {
+        EP_CTRL(ep).IN   = 0U;
+        BUF_CTRL(ep).IN  = 0U;
+        EP_CTRL(ep).OUT  = 0U;
+        BUF_CTRL(ep).OUT = 0U;
+    }
 }
 
 /**
@@ -662,13 +607,6 @@ void usb_lld_reset(USBDriver *usbp) {
 void usb_lld_set_address(USBDriver *usbp) {
   /* Set address to hardware here. */
   USB->DEVADDRCTRL = USB_ADDR_ENDP0_ADDRESS_Msk & (usbp->address << USB_ADDR_ENDP0_ADDRESS_Pos);
-
-#ifdef USB_DEBUG
-  cmd_send(CMD_SET_ADDR, 1);
-  data_send(usbp->address);
-#endif
-
-  reset_ep0(usbp);
 }
 
 /**
@@ -680,67 +618,67 @@ void usb_lld_set_address(USBDriver *usbp) {
  * @notapi
  */
 void usb_lld_init_endpoint(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
+    uint16_t                 buf_size;
+    uint16_t                 buf_offset;
+    uint32_t                 buf_ctrl;
+    const USBEndpointConfig *epcp = usbp->epc[ep];
 
-  uint16_t buf_size;
-  uint16_t buf_offset;
-  uint32_t buf_ctrl;
-  const USBEndpointConfig *epcp = usbp->epc[ep];
-
-  if (ep == 0) {
-    epcp->in_state->hw_buf = (uint8_t*)&USB_DPSRAM->EP0BUF0;
-    epcp->in_state->buf_size = 64;
-    USB->SET.SIECTRL = USB_EP_BUFFER_IRQ_EN;
-    BUF_CTRL(0).OUT = USB_BUFFER_BUFFER0_AVAILABLE;
-    epcp->in_state->next_pid = 1U;
-    epcp->in_state->active = false;
-    epcp->in_state->stalled = false;
-    return;
-  }
-
-  if (epcp->in_state) {
-    buf_ctrl = 0;
-    epcp->in_state->active = false;
-    epcp->in_state->stalled = false;
-    epcp->in_state->next_pid = 0U;
-
-    if (epcp->ep_mode == USB_EP_MODE_TYPE_ISOC) {
-      buf_size = usb_isochronous_buffer_size(epcp->in_maxsize);
-      buf_ctrl |= usb_isochronous_buffer_mode(buf_size) << USB_BUFFER_DOUBLE_BUFFER_OFFSET_Pos;
-    } else {
-      buf_size = 64;
+    if (ep == 0) {
+        epcp->in_state->hw_buf    = (uint8_t *)&USB_DPSRAM->EP0BUF0;
+        epcp->in_state->buf_size  = 64;
+        epcp->in_state->next_pid  = 0U;
+        epcp->in_state->active    = false;
+        epcp->in_state->stalled   = false;
+        epcp->out_state->hw_buf   = (uint8_t *)&USB_DPSRAM->EP0BUF0;
+        epcp->out_state->buf_size = 64;
+        epcp->out_state->next_pid = 0U;
+        epcp->out_state->active   = false;
+        epcp->out_state->stalled  = false;
+        USB->SET.SIECTRL          = USB_EP_BUFFER_IRQ_EN;
+        return;
     }
-    buf_offset = usb_buffer_next_offset(usbp, buf_size, true);
-    epcp->in_state->hw_buf = (uint8_t*)&USB_DPSRAM->DATA[buf_offset];
-    epcp->in_state->buf_size = buf_size;
 
-    EP_CTRL(ep).IN = USB_EP_EN |
-                      (epcp->ep_mode << USB_EP_TYPE_Pos) |
-                      ((uint8_t*)epcp->in_state->hw_buf - (uint8_t*)USB_DPSRAM);
-    BUF_CTRL(ep).IN = buf_ctrl;
-  }
+    if (epcp->in_state) {
+        buf_ctrl                 = 0U;
+        BUF_CTRL(ep).IN          = buf_ctrl;
+        epcp->in_state->active   = false;
+        epcp->in_state->stalled  = false;
+        epcp->in_state->next_pid = 0U;
 
-  if (epcp->out_state) {
-    buf_ctrl = USB_BUFFER_BUFFER0_AVAILABLE | epcp->out_maxsize;
-    epcp->out_state->active = false;
-    epcp->out_state->stalled = false;
-    epcp->out_state->next_pid = 1U;
+        if (epcp->ep_mode == USB_EP_MODE_TYPE_ISOC) {
+            buf_size = usb_isochronous_buffer_size(epcp->in_maxsize);
+            buf_ctrl |= usb_isochronous_buffer_mode(buf_size) << USB_BUFFER_DOUBLE_BUFFER_OFFSET_Pos;
+        } else {
+            buf_size = 64;
+        }
+        buf_offset               = usb_buffer_next_offset(usbp, buf_size, true);
+        epcp->in_state->hw_buf   = (uint8_t *)&USB_DPSRAM->DATA[buf_offset];
+        epcp->in_state->buf_size = buf_size;
 
-    if (epcp->ep_mode == USB_EP_MODE_TYPE_ISOC) {
-      buf_size = usb_isochronous_buffer_size(epcp->in_maxsize);
-      buf_ctrl |= usb_isochronous_buffer_mode(buf_size) << USB_BUFFER_DOUBLE_BUFFER_OFFSET_Pos;
-    } else {
-      buf_size = 64;
+        EP_CTRL(ep).IN  = USB_EP_EN | (epcp->ep_mode << USB_EP_TYPE_Pos) | ((uint8_t *)epcp->in_state->hw_buf - (uint8_t *)USB_DPSRAM);
+        BUF_CTRL(ep).IN = buf_ctrl;
     }
-    buf_offset = usb_buffer_next_offset(usbp, buf_size, false);
-    epcp->out_state->hw_buf = (uint8_t*)&USB_DPSRAM->DATA[buf_offset];
-    epcp->out_state->buf_size = buf_size;
 
-    EP_CTRL(ep).OUT = USB_EP_EN | USB_EP_BUFFER_IRQ_EN |
-                       (epcp->ep_mode << USB_EP_TYPE_Pos) |
-                       ((uint8_t*)epcp->out_state->hw_buf - (uint8_t*)USB_DPSRAM);
-    BUF_CTRL(ep).OUT = buf_ctrl;
-  }
+    if (epcp->out_state) {
+        buf_ctrl                  = 0U;
+        BUF_CTRL(ep).OUT          = buf_ctrl;
+        epcp->out_state->active   = false;
+        epcp->out_state->stalled  = false;
+        epcp->out_state->next_pid = 0U;
+
+        if (epcp->ep_mode == USB_EP_MODE_TYPE_ISOC) {
+            buf_size = usb_isochronous_buffer_size(epcp->in_maxsize);
+            buf_ctrl |= usb_isochronous_buffer_mode(buf_size) << USB_BUFFER_DOUBLE_BUFFER_OFFSET_Pos;
+        } else {
+            buf_size = 64;
+        }
+        buf_offset                = usb_buffer_next_offset(usbp, buf_size, false);
+        epcp->out_state->hw_buf   = (uint8_t *)&USB_DPSRAM->DATA[buf_offset];
+        epcp->out_state->buf_size = buf_size;
+
+        EP_CTRL(ep).OUT  = USB_EP_EN | (epcp->ep_mode << USB_EP_TYPE_Pos) | ((uint8_t *)epcp->out_state->hw_buf - (uint8_t *)USB_DPSRAM);
+        BUF_CTRL(ep).OUT = buf_ctrl;
+    }
 }
 
 /**
@@ -751,10 +689,8 @@ void usb_lld_init_endpoint(USBDriver *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_disable_endpoints(USBDriver *usbp) {
-  uint8_t ep;
-
   /* Ignore zero */
-  for (ep = 1; ep <= USB_ENDOPOINTS_NUMBER; ep++) {
+  for (uint8_t ep = 1; ep <= USB_ENDOPOINTS_NUMBER; ep++) {
     usbp->epc[ep]->in_state->active = false;
     usbp->epc[ep]->in_state->stalled = false;
     usbp->epc[ep]->in_state->next_pid = 0;
@@ -780,7 +716,6 @@ void usb_lld_disable_endpoints(USBDriver *usbp) {
  * @notapi
  */
 usbepstatus_t usb_lld_get_status_out(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
   USBOutEndpointState *out_state = usbp->epc[ep]->out_state;
 
   if (out_state) {
@@ -806,7 +741,6 @@ usbepstatus_t usb_lld_get_status_out(USBDriver *usbp, usbep_t ep) {
  * @notapi
  */
 usbepstatus_t usb_lld_get_status_in(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
   USBInEndpointState *in_state = usbp->epc[ep]->in_state;
 
   if (in_state) {
@@ -836,13 +770,6 @@ usbepstatus_t usb_lld_get_status_in(USBDriver *usbp, usbep_t ep) {
 void usb_lld_read_setup(USBDriver *usbp, usbep_t ep, uint8_t *buf) {
   (void)usbp;
   (void)ep;
-#ifdef USB_DEBUG
-  uint32_t data1 = *((uint32_t*)USB_DPSRAM->SETUPPACKET);
-  uint32_t data2 = *((uint32_t*)(USB_DPSRAM->SETUPPACKET + 4));
-  cmd_send(CMD_READ_SETUP, 2);
-  data_send(data1);
-  data_send(data2);
-#endif
   /* Copy data from hardware buffer to user buffer */
   memcpy((void *)buf, (void *)USB_DPSRAM->SETUPPACKET, 8);
 }
@@ -856,22 +783,18 @@ void usb_lld_read_setup(USBDriver *usbp, usbep_t ep, uint8_t *buf) {
  * @notapi
  */
 void usb_lld_start_out(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
   USBOutEndpointState *oesp = usbp->epc[ep]->out_state;
 
   /* Transfer initialization.*/
-  if (oesp->rxsize == 0) {
+  if (oesp->rxsize == 0U) {
     /* Special case for zero sized packets.*/
-    oesp->rxpkts = 1;
+    oesp->rxpkts = 1U;
   } else {
     oesp->rxpkts = (uint16_t)((oesp->rxsize + usbp->epc[ep]->out_maxsize - 1) /
                              usbp->epc[ep]->out_maxsize);
   }
 
-#ifdef USB_DEBUG
-  cmd_send(CMD_START_OUT, 1);
-  data_send((ep << 24) | oesp->rxsize | (oesp->rxpkts << 16));
-#endif
+  usb_prepare_out_ep(usbp, ep);
 }
 
 /**
@@ -884,10 +807,6 @@ void usb_lld_start_out(USBDriver *usbp, usbep_t ep) {
  */
 void usb_lld_start_in(USBDriver *usbp, usbep_t ep) {
   USBInEndpointState *iesp = usbp->epc[ep]->in_state;
-#ifdef USB_DEBUG
-  cmd_send(CMD_START_IN, 1);
-  data_send((ep << 24) | iesp->txsize);
-#endif
   iesp->txlast = 0;
 
   /* Prepare IN endpoint. */
@@ -903,13 +822,12 @@ void usb_lld_start_in(USBDriver *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_stall_out(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
-
-  if (ep == 0) {
-    USB->SET.EPSTALLARM = USB_EP_STALL_ARM_EP0_OUT;
-  }
-  BUF_CTRL(ep).OUT |= USB_BUFFER_STALL;
-  usbp->epc[ep]->out_state->stalled = true;
+    if (ep == 0) {
+        USB->SET.EPSTALLARM = USB_EP_STALL_ARM_EP0_OUT;
+    }
+    BUF_CTRL(ep).OUT |= USB_BUFFER_STALL;
+    usbp->epc[ep]->out_state->stalled  = true;
+    usbp->epc[ep]->out_state->next_pid = 0U;
 }
 
 /**
@@ -921,13 +839,12 @@ void usb_lld_stall_out(USBDriver *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_stall_in(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
-
-  if (ep == 0) {
-    USB->SET.EPSTALLARM = USB_EP_STALL_ARM_EP0_IN;
-  }
-  BUF_CTRL(ep).IN |= USB_BUFFER_STALL;
-  usbp->epc[ep]->in_state->stalled = true;
+    if (ep == 0) {
+        USB->SET.EPSTALLARM = USB_EP_STALL_ARM_EP0_IN;
+    }
+    BUF_CTRL(ep).IN |= USB_BUFFER_STALL;
+    usbp->epc[ep]->in_state->stalled  = true;
+    usbp->epc[ep]->in_state->next_pid = 0U;
 }
 
 /**
@@ -939,13 +856,11 @@ void usb_lld_stall_in(USBDriver *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_clear_out(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
+    if (ep > 0) {
+        BUF_CTRL(ep).OUT &= ~USB_BUFFER_STALL;
+    }
 
-  if (ep == 0) {
-    USB->CLR.EPSTALLARM = USB_EP_STALL_ARM_EP0_OUT;
-  }
-  BUF_CTRL(ep).OUT &= ~USB_BUFFER_STALL;
-  usbp->epc[ep]->out_state->stalled = false;
+    usbp->epc[ep]->out_state->stalled = false;
 }
 
 /**
@@ -957,13 +872,11 @@ void usb_lld_clear_out(USBDriver *usbp, usbep_t ep) {
  * @notapi
  */
 void usb_lld_clear_in(USBDriver *usbp, usbep_t ep) {
-  (void)usbp;
+    if (ep > 0) {
+        BUF_CTRL(ep).IN &= ~USB_BUFFER_STALL;
+    }
 
-  if (ep == 0) {
-    USB->CLR.EPSTALLARM = USB_EP_STALL_ARM_EP0_IN;
-  }
-  BUF_CTRL(ep).IN &= ~USB_BUFFER_STALL;
-  usbp->epc[ep]->in_state->stalled = false;
+    usbp->epc[ep]->in_state->stalled = false;
 }
 
 #endif /* HAL_USE_USB == TRUE */
