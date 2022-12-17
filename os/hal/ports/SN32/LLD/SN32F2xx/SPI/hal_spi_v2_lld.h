@@ -27,6 +27,8 @@
 
 #if HAL_USE_SPI || defined(__DOXYGEN__)
 
+#include "sn32_spi.h"
+
 /*===========================================================================*/
 /* Driver constants.                                                         */
 /*===========================================================================*/
@@ -40,6 +42,38 @@
  * @brief   Slave mode support flag.
  */
 #define SPI_SUPPORTS_SLAVE_MODE         TRUE
+
+/** @defgroup SPI_Exported_Constants
+  * @{
+  */
+
+/** @defgroup SPI_SN32_CTRL0
+  * @{
+  */
+#define SPI_DATA_LENGTH(x)              ((x - 1) << 8)
+#define SPI_TXFIFO_LENGTH(x)            (x << 12)
+#define SPI_RXFIFO_LENGTH(x)            (x << 15)
+#define SPI_LOOPBACK_ENABLE             (1 << 1)
+/**
+  * @}
+  */
+
+/** @defgroup SPI_SN32_CTRL1
+  * @{
+  */
+#define SPI_MLSB_MSB                    (0 << 0)
+#define SPI_MLSB_LSB                    (1 << 0)
+#define SPI_CPOL_LOW                    (0 << 1)
+#define SPI_CPOL_HIGH                   (1 << 1)
+#define SPI_CPHA_FALLING                (0 << 2)
+#define SPI_CPHA_RISING                 (1 << 2)
+/**
+  * @}
+  */
+
+/**
+  * @}
+  */
 
 /*===========================================================================*/
 /* Driver pre-compile time settings.                                         */
@@ -98,18 +132,6 @@
 /* Driver data structures and types.                                         */
 /*===========================================================================*/
 
-typedef struct {
-  uint32_t CTRL0;
-  uint32_t CTRL1;
-  uint32_t CLKDIV;
-  uint32_t STAT;
-  uint32_t IE;
-  uint32_t RIS;
-  uint32_t IC;
-  uint32_t DATA;
-  uint32_t DFDLY;
-} sn32_spi_t;
-
 #if SN32_HAS_SPI0
 #define SN32_SPI0_BASE  SN_SPI0_BASE
 #define SN32_SPI0       ((sn32_spi_t *)SN_SPI0_BASE)
@@ -124,22 +146,22 @@ typedef struct {
 /* Driver macros.                                                            */
 /*===========================================================================*/
 
+#define SPI_FIFO_FRESET(spip) (spip->spi->CTRL0_b.FRESET = 0b11)
+
 /**
  * @brief   Low level fields of the SPI driver structure.
  */
 #define spi_lld_driver_fields                                               \
-  /* Dummy field, it is not needed.*/                                       \
   sn32_spi_t                *spi;                                           \
   uint8_t                   *rxbuf;                                         \
   const uint8_t             *txbuf;                                         \
-  size_t                    count;                                          \
-  size_t                    idx;
+  uint32_t                  count;                                          \
+  uint32_t                  idx;
 
 /**
  * @brief   Low level fields of the SPI configuration structure.
  */
 #define spi_lld_config_fields                                               \
-  /* Dummy configuration, it is not needed.*/                               \
   uint32_t                  ctrl0;                                          \
   uint32_t                  ctrl1;                                          \
   uint32_t                  clkdiv;
