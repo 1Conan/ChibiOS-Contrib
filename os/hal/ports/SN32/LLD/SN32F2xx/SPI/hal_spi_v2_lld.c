@@ -38,14 +38,14 @@
  * @brief   SPI0 driver identifier.
  */
 #if (SN32_SPI_USE_SPI0 == TRUE) || defined(__DOXYGEN__)
-SPIDriver SPID1;
+SPIDriver SPID0;
 #endif
 
 /**
  * @brief   SPI1 driver identifier.
  */
 #if (SN32_SPI_USE_SPI1 == TRUE) || defined(__DOXYGEN__)
-SPIDriver SPID2;
+SPIDriver SPID1;
 #endif
 
 /*===========================================================================*/
@@ -108,7 +108,7 @@ static inline void spi_lld_irq_handler(SPIDriver *spip) {
 OSAL_IRQ_HANDLER(SN32_SPI0_HANDLER) {
   OSAL_IRQ_PROLOGUE();
 
-  spi_lld_irq_handler(&SPID1);
+  spi_lld_irq_handler(&SPID0);
 
   OSAL_IRQ_EPILOGUE();
 }
@@ -118,7 +118,7 @@ OSAL_IRQ_HANDLER(SN32_SPI0_HANDLER) {
 OSAL_IRQ_HANDLER(SN32_SPI1_HANDLER) {
   OSAL_IRQ_PROLOGUE();
 
-  spi_lld_irq_handler(&SPID2);
+  spi_lld_irq_handler(&SPID1);
 
   OSAL_IRQ_EPILOGUE();
 }
@@ -137,14 +137,14 @@ void spi_lld_init(void) {
 
 #if SN32_SPI_USE_SPI0 == TRUE
   /* Driver initialization.*/
-  spiObjectInit(&SPID1);
-  SPID1.spi = SN32_SPI0;
+  spiObjectInit(&SPID0);
+  SPID0.spi = SN32_SPI0;
 #endif
 
 #if SN32_SPI_USE_SPI1 == TRUE
   /* Driver initialization.*/
-  spiObjectInit(&SPID2);
-  SPID2.spi = SN32_SPI1;
+  spiObjectInit(&SPID1);
+  SPID1.spi = SN32_SPI1;
 #endif
 }
 
@@ -163,7 +163,7 @@ msg_t spi_lld_start(SPIDriver *spip) {
     /* Enables the peripheral.*/
 
 #if SN32_SPI_USE_SPI0 == TRUE
-    if (&SPID1 == spip) {
+    if (&SPID0 == spip) {
       sys1EnableSPI0();
       nvicClearPending(SN32_SPI0_NUMBER);
       nvicEnableVector(SN32_SPI0_NUMBER, SN32_SPI_SPI0_IRQ_PRIORITY);
@@ -171,7 +171,7 @@ msg_t spi_lld_start(SPIDriver *spip) {
 #endif
 
 #if SN32_SPI_USE_SPI1 == TRUE
-    if (&SPID2 == spip) {
+    if (&SPID1 == spip) {
       sys1EnableSPI1();
       nvicClearPending(SN32_SPI1_NUMBER);
       nvicEnableVector(SN32_SPI1_NUMBER, SN32_SPI_SPI1_IRQ_PRIORITY);
@@ -206,14 +206,14 @@ void spi_lld_stop(SPIDriver *spip) {
     spip->spi->CTRL0_b.SPIEN = false;
 
 #if SN32_SPI_USE_SPI0 == TRUE
-    if (&SPID1 == spip) {
+    if (&SPID0 == spip) {
       sys1DisableSPI0();
       nvicDisableVector(SN32_SPI0_NUMBER);
     }
 #endif
 
 #if SN32_SPI_USE_SPI1 == TRUE
-    if (&SPID2 == spip) {
+    if (&SPID1 == spip) {
       sys1DisableSPI1();
       nvicDisableVector(SN32_SPI1_NUMBER);
     }

@@ -172,11 +172,11 @@
 /*===========================================================================*/
 
 #if (SN32_SPI_USE_SPI0 == TRUE) && !defined(__DOXYGEN__)
-extern SPIDriver SPID1;
+extern SPIDriver SPID0;
 #endif
 
 #if (SN32_SPI_USE_SPI1 == TRUE) && !defined(__DOXYGEN__)
-extern SPIDriver SPID2;
+extern SPIDriver SPID1;
 #endif
 
 #ifdef __cplusplus
