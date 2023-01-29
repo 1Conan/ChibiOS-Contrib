@@ -1,5 +1,5 @@
 /*
-    ChibiOS - Copyright (C) 2022 1Conan
+    ChibiOS - Copyright (C) 2023 1Conan
 
     Licensed under the Apache License, Version 2.0 (the "License");
     you may not use this file except in compliance with the License.
@@ -38,14 +38,14 @@
  * @brief   SPI0 driver identifier.
  */
 #if (SN32_SPI_USE_SPI0 == TRUE) || defined(__DOXYGEN__)
-SPIDriver SPID1;
+SPIDriver SPID0;
 #endif
 
 /**
  * @brief   SPI1 driver identifier.
  */
 #if (SN32_SPI_USE_SPI1 == TRUE) || defined(__DOXYGEN__)
-SPIDriver SPID2;
+SPIDriver SPID1;
 #endif
 
 /*===========================================================================*/
@@ -57,44 +57,46 @@ SPIDriver SPID2;
 /*===========================================================================*/
 
 static void spi_lld_configure(SPIDriver *spip) {
-  // TODO: use defines for values
   spip->spi->CTRL0 = spip->config->ctrl0;
   spip->spi->CTRL1 = spip->config->ctrl1;
   spip->spi->CLKDIV = spip->config->clkdiv;
 
-#if SPI_SUPPORTS_SLAVE_MODE
-  spip->spi->CTRL0 |= (spip->config->slave << 3); // MS
-  if (spip->config->slave) {
-    spip->spi->CTRL0 |= (0 << 2); // SDODIS = 0
-  }
-#else
-  spip->spi->CTRL0 |= (0 << 3); // MS = master
-#endif
-  spip->spi->CTRL0 |= (0 << 1); // LOOPBACK
+  spip->spi->CTRL0 |= (spip->config->slave << 3);
+  spip->spi->CTRL0_b.SDODIS = false;
 
-  uint32_t sn32_spi_clock = (SN32_HCLK / ((2 * spip->spi->CLKDIV) + 2));
+#if SPI_SELECT_MODE == SPI_SELECT_MODE_LLD
+  // Use hardware Auto-SEL
+  spip->spi->CTRL0_b.SELDIS = false;
+#endif
+
+  uint32_t sn32_spi_clock = (SN32_HCLK / ((2 * spip->config->clkdiv) + 2));
   if (sn32_spi_clock > 6000000) {
     spip->spi->DFDLY = true;
   }
 
-  spip->spi->IC = 0b1111; // clear all interrupts
-  spip->spi->IE = 0b0010; // RXFIFOTHIE
+  SPI_FIFO_FRESET(spip);
 
-  spip->spi->CTRL0 |= (3 << 6); // FRESET
+  spip->spi->IC = 0b1111;
+  // enable RX FIFO threshold interrupt
+  spip->spi->IE = 0b0100;
 
-  spip->spi->CTRL0 |= (1 << 0); // SPIEN
+  spip->spi->CTRL0_b.SPIEN = true;
 }
 
 static inline void spi_lld_irq_handler(SPIDriver *spip) {
-  if (spip->spi->RIS & (0x1<<2)) {
-    if (spip->rxbuf) spip->rxbuf[spip->idx] = spip->spi->DATA;
+  if (spip->spi->RIS_b.RXFIFOTHIF) {
+    chSysLockFromISR();
+    uint16_t data = spip->spi->DATA;
+    spip->spi->IC_b.RXFIFOTHIC = true;
+    chSysUnlockFromISR();
+
+    if (spip->rxbuf) spip->rxbuf[spip->idx] = data;
 
     if (++(spip->idx) >= spip->count) {
       __spi_isr_complete_code(spip);
     } else {
       spip->spi->DATA = spip->txbuf ? spip->txbuf[spip->idx] : 0x00;
     }
-    spip->spi->IC = (0x1<<2);
   }
 }
 
@@ -105,7 +107,9 @@ static inline void spi_lld_irq_handler(SPIDriver *spip) {
 #if SN32_SPI_USE_SPI0
 OSAL_IRQ_HANDLER(SN32_SPI0_HANDLER) {
   OSAL_IRQ_PROLOGUE();
-  spi_lld_irq_handler(&SPID1);
+
+  spi_lld_irq_handler(&SPID0);
+
   OSAL_IRQ_EPILOGUE();
 }
 #endif
@@ -113,7 +117,9 @@ OSAL_IRQ_HANDLER(SN32_SPI0_HANDLER) {
 #if SN32_SPI_USE_SPI1
 OSAL_IRQ_HANDLER(SN32_SPI1_HANDLER) {
   OSAL_IRQ_PROLOGUE();
-  spi_lld_irq_handler(&SPID2);
+
+  spi_lld_irq_handler(&SPID1);
+
   OSAL_IRQ_EPILOGUE();
 }
 #endif
@@ -131,14 +137,14 @@ void spi_lld_init(void) {
 
 #if SN32_SPI_USE_SPI0 == TRUE
   /* Driver initialization.*/
-  spiObjectInit(&SPID1);
-  SPID1.spi = SN32_SPI0;
+  spiObjectInit(&SPID0);
+  SPID0.spi = SN32_SPI0;
 #endif
 
 #if SN32_SPI_USE_SPI1 == TRUE
   /* Driver initialization.*/
-  spiObjectInit(&SPID2);
-  SPID2.spi = SN32_SPI1;
+  spiObjectInit(&SPID1);
+  SPID1.spi = SN32_SPI1;
 #endif
 }
 
@@ -152,16 +158,12 @@ void spi_lld_init(void) {
  */
 msg_t spi_lld_start(SPIDriver *spip) {
 
-  spi_lld_configure(spip);
-
   if (spip->state == SPI_STOP) {
 
     /* Enables the peripheral.*/
-    if (false) {
-    }
 
 #if SN32_SPI_USE_SPI0 == TRUE
-    if (&SPID1 == spip) {
+    if (&SPID0 == spip) {
       sys1EnableSPI0();
       nvicClearPending(SN32_SPI0_NUMBER);
       nvicEnableVector(SN32_SPI0_NUMBER, SN32_SPI_SPI0_IRQ_PRIORITY);
@@ -169,9 +171,10 @@ msg_t spi_lld_start(SPIDriver *spip) {
 #endif
 
 #if SN32_SPI_USE_SPI1 == TRUE
-    if (&SPID2 == spip) {
+    if (&SPID1 == spip) {
+      sys1EnableSPI1();
       nvicClearPending(SN32_SPI1_NUMBER);
-      nvicEnableVector(SN32_SPI1_NUMBER, SN32_SPI_SPI0_IRQ_PRIORITY);
+      nvicEnableVector(SN32_SPI1_NUMBER, SN32_SPI_SPI1_IRQ_PRIORITY);
     }
 #endif
 
@@ -179,6 +182,8 @@ msg_t spi_lld_start(SPIDriver *spip) {
       osalDbgAssert(false, "invalid SPI instance");
     }
   }
+
+  spi_lld_configure(spip);
 
   return HAL_RET_SUCCESS;
 }
@@ -195,23 +200,20 @@ void spi_lld_stop(SPIDriver *spip) {
   if (spip->state == SPI_READY) {
 
     /* Disables the peripheral.*/
-    if (false) {
-    }
 
-    // TODO: FIFO_RESET
-    spip->spi->CTRL0 |= (0b11 << 6);
-    // TODO: disable spi
-    spip->spi->CTRL0 |= (0 << 0);
+    SPI_FIFO_FRESET(spip);
+
+    spip->spi->CTRL0_b.SPIEN = false;
 
 #if SN32_SPI_USE_SPI0 == TRUE
-    if (&SPID1 == spip) {
+    if (&SPID0 == spip) {
       sys1DisableSPI0();
       nvicDisableVector(SN32_SPI0_NUMBER);
     }
 #endif
 
 #if SN32_SPI_USE_SPI1 == TRUE
-    if (&SPID2 == spip) {
+    if (&SPID1 == spip) {
       sys1DisableSPI1();
       nvicDisableVector(SN32_SPI1_NUMBER);
     }
@@ -234,7 +236,7 @@ void spi_lld_stop(SPIDriver *spip) {
 void spi_lld_select(SPIDriver *spip) {
 
   (void)spip;
-  // noop
+  // noop - hardware auto-sel
 }
 
 /**
@@ -248,7 +250,7 @@ void spi_lld_select(SPIDriver *spip) {
 void spi_lld_unselect(SPIDriver *spip) {
 
   (void)spip;
-  // noop
+  // noop - hardware auto-sel
 }
 #endif
 
@@ -266,10 +268,7 @@ void spi_lld_unselect(SPIDriver *spip) {
  * @notapi
  */
 msg_t spi_lld_ignore(SPIDriver *spip, size_t n) {
-
-  spi_lld_exchange(spip, n, NULL, NULL);
-
-  return HAL_RET_SUCCESS;
+  return spi_lld_exchange(spip, n, NULL, NULL);
 }
 
 /**
@@ -291,12 +290,12 @@ msg_t spi_lld_ignore(SPIDriver *spip, size_t n) {
 msg_t spi_lld_exchange(SPIDriver *spip, size_t n,
                        const void *txbuf, void *rxbuf) {
 
-  spip->count = n;
   spip->txbuf = txbuf;
   spip->rxbuf = rxbuf;
+  spip->count = n;
   spip->idx = 0;
 
-  spip->spi->DATA = spip->txbuf ? spip->txbuf[spip->idx] : 0x00;
+  spip->spi->DATA = spip->txbuf ? spip->txbuf[0] : 0x00;
 
   return HAL_RET_SUCCESS;
 }
@@ -316,10 +315,7 @@ msg_t spi_lld_exchange(SPIDriver *spip, size_t n,
  * @notapi
  */
 msg_t spi_lld_send(SPIDriver *spip, size_t n, const void *txbuf) {
-
-  spi_lld_exchange(spip, n, txbuf, NULL);
-
-  return HAL_RET_SUCCESS;
+  return spi_lld_exchange(spip, n, txbuf, NULL);
 }
 
 /**
@@ -337,10 +333,7 @@ msg_t spi_lld_send(SPIDriver *spip, size_t n, const void *txbuf) {
  * @notapi
  */
 msg_t spi_lld_receive(SPIDriver *spip, size_t n, void *rxbuf) {
-
-  spi_lld_exchange(spip, n, NULL, rxbuf);
-
-  return HAL_RET_SUCCESS;
+  return spi_lld_exchange(spip, n, NULL, rxbuf);
 }
 
 /**
@@ -355,9 +348,11 @@ msg_t spi_lld_receive(SPIDriver *spip, size_t n, void *rxbuf) {
  */
 msg_t spi_lld_stop_transfer(SPIDriver *spip, size_t *sizep) {
 
-  // TODO: FIFO_RESET
-  spip->spi->CTRL0 = (0b11 << 6);
-  *sizep = spip->count - spip->idx;
+  SPI_FIFO_FRESET(spip);
+
+  if (sizep != NULL) {
+    *sizep = spip->count - spip->idx;
+  }
 
   return HAL_RET_SUCCESS;
 }
@@ -375,10 +370,9 @@ msg_t spi_lld_stop_transfer(SPIDriver *spip, size_t *sizep) {
  * @return              The received data frame from the SPI bus.
  */
 uint16_t spi_lld_polled_exchange(SPIDriver *spip, uint16_t frame) {
-
   spip->spi->DATA = frame;
-  // TODO: use masks
-  while (((spip->spi->STAT >> 2) & 1) == 0);
+  while (spip->spi->STAT_b.RX_EMPTY);
+
   return spip->spi->DATA;
 }
 
